@@ -25,7 +25,7 @@ def load_data(url: str) -> pd.DataFrame:
 
 if auto_refresh:
     # Trigger a periodic rerun (works in Streamlit >= 1.25)
-    st.experimental_rerun  # exist reference to avoid linter warning
+    # exist reference to avoid linter warning
     st.autorefresh = st.sidebar.empty()
     st.sidebar.caption("Il refresh automatico usa cache con TTL 60s.")
     st.sidebar.write(" ")
