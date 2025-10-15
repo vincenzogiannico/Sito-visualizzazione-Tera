@@ -2,7 +2,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Tera Monitor", page_icon="📈", layout="wide")
 
@@ -10,26 +10,21 @@ CSV_URL = "https://gist.githubusercontent.com/vincenzogiannico/53654730a091a40b4
 
 # --- Sidebar ---
 st.sidebar.title("⚙️ Controlli")
-auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True, help="Ricarica automaticamente i dati dalla sorgente")
-refresh_sec = st.sidebar.number_input("Intervallo refresh (s)", min_value=10, max_value=3600, value=60, step=10)
+st.sidebar.caption("Il caricamento usa cache con TTL fisso (60s). Usa 'Ricarica dati' per forzare un reload.")
+reload_btn = st.sidebar.button("🔄 Ricarica dati (svuota cache)")
 
 # --- Data loading ---
 @st.cache_data(ttl=60)
 def load_data(url: str) -> pd.DataFrame:
     df = pd.read_csv(url)
-    # Parse ISO8601 with timezone if present
-    df['ts'] = pd.to_datetime(df['ts'], utc=True, errors='coerce')
-    # Ensure sorted
-    df = df.sort_values('ts')
+    # Parse ISO8601; se è presente il fuso orario, pandas lo conserva
+    df['ts'] = pd.to_datetime(df['ts'], utc=True, errors='coerce')  # imponiamo UTC
+    df = df.dropna(subset=['ts']).sort_values('ts')
     return df
 
-if auto_refresh:
-    # Trigger a periodic rerun (works in Streamlit >= 1.25)
-    # exist reference to avoid linter warning
-    st.autorefresh = st.sidebar.empty()
-    st.sidebar.caption("Il refresh automatico usa cache con TTL 60s.")
-    st.sidebar.write(" ")
-    st.experimental_set_query_params(_=datetime.now(timezone.utc).timestamp())  # keeps the browser URL changing slightly
+if reload_btn:
+    load_data.clear()
+    st.experimental_rerun()
 
 df = load_data(CSV_URL)
 
@@ -40,7 +35,6 @@ if df.empty or df['ts'].isna().all():
 # Identify numeric columns (exclude 'ts')
 num_cols = [c for c in df.columns if c != 'ts' and pd.api.types.is_numeric_dtype(df[c])]
 default_vars = []
-# Choose reasonable defaults if present
 for cand in ["A01_Temp", "A01_Umid"]:
     if cand in num_cols:
         default_vars.append(cand)
@@ -51,6 +45,15 @@ st.title("📊 Tera – Dashboard interattiva")
 
 # --- Time window selection ---
 st.subheader("Finestra temporale")
+
+# Helper per creare valori di input naive (senza tz) per i widget
+def to_naive(dt_aware: pd.Timestamp) -> datetime:
+    # Converte in UTC, poi ritorna naive (senza tz) per compatibilità con gli input Streamlit
+    return dt_aware.tz_convert('UTC').to_pydatetime().replace(tzinfo=None)
+
+min_ts_aware = df['ts'].min().tz_convert('UTC')
+max_ts_aware = df['ts'].max().tz_convert('UTC')
+
 col_a, col_b = st.columns([1,2])
 with col_a:
     preset = st.selectbox(
@@ -60,47 +63,64 @@ with col_a:
     )
 with col_b:
     if preset == "Personalizzato":
-        min_ts = df['ts'].min().to_pydatetime()
-        max_ts = df['ts'].max().to_pydatetime()
-        start = st.datetime_input("Inizio (UTC)", value=max_ts - timedelta(days=1), min_value=min_ts, max_value=max_ts)
-        end = st.datetime_input("Fine (UTC)", value=max_ts, min_value=min_ts, max_value=max_ts)
+        start = st.datetime_input(
+            "Inizio (UTC)",
+            value=to_naive(min(max_ts_aware - pd.Timedelta(days=1), max_ts_aware)),
+            min_value=to_naive(min_ts_aware),
+            max_value=to_naive(max_ts_aware)
+        )
+        end = st.datetime_input(
+            "Fine (UTC)",
+            value=to_naive(max_ts_aware),
+            min_value=to_naive(min_ts_aware),
+            max_value=to_naive(max_ts_aware)
+        )
     else:
-        max_ts = df['ts'].max().to_pydatetime()
+        max_naive = to_naive(max_ts_aware)
         if preset == "Ultime 6 ore":
-            start, end = max_ts - timedelta(hours=6), max_ts
+            start, end = max_naive - timedelta(hours=6), max_naive
         elif preset == "Ultime 12 ore":
-            start, end = max_ts - timedelta(hours=12), max_ts
+            start, end = max_naive - timedelta(hours=12), max_naive
         elif preset == "Ultime 24 ore":
-            start, end = max_ts - timedelta(hours=24), max_ts
+            start, end = max_naive - timedelta(hours=24), max_naive
         elif preset == "Ultimi 3 giorni":
-            start, end = max_ts - timedelta(days=3), max_ts
+            start, end = max_naive - timedelta(days=3), max_naive
         elif preset == "Ultimi 7 giorni":
-            start, end = max_ts - timedelta(days=7), max_ts
+            start, end = max_naive - timedelta(days=7), max_naive
         else:
-            start, end = max_ts - timedelta(days=1), max_ts
+            start, end = max_naive - timedelta(days=1), max_naive
 
-# Filter by time window (timestamps are UTC)
-mask = (df['ts'] >= pd.Timestamp(start, tz='UTC')) & (df['ts'] <= pd.Timestamp(end, tz='UTC'))
+# Funzione robusta: porta qualsiasi datetime a Timestamp UTC consapevole
+def ensure_ts_utc(x) -> pd.Timestamp:
+    tx = pd.Timestamp(x)
+    if tx.tzinfo is None:
+        return tx.tz_localize('UTC')
+    return tx.tz_convert('UTC')
+
+start_utc = ensure_ts_utc(start)
+end_utc = ensure_ts_utc(end)
+
+# Filtro temporale
+mask = (df['ts'] >= start_utc) & (df['ts'] <= end_utc)
 dff = df.loc[mask].copy()
 if dff.empty:
-    st.warning("La finestra selezionata non contiene dati.")
+    st.warning("La finestra selezionata non contiene dati. Mostro l'ultimo record disponibile.")
     dff = df.tail(1)
 
-# --- Variable selection ---
+# --- Sidebar: variabili e opzioni ---
 with st.sidebar:
     st.markdown("---")
     st.markdown("### Variabili")
     vars_selected = st.multiselect("Seleziona variabili (max 6)", options=num_cols, default=default_vars, max_selections=6)
     resample = st.selectbox("Aggregazione (resample)", options=["nessuna", "5min", "15min", "1H", "3H", "6H"], index=0,
-                            help="Applica una media su intervalli temporali per rendere le serie più leggibili.")
+                            help="Media su intervalli temporali per rendere le serie più leggibili.")
     show_points = st.checkbox("Mostra punti", value=False)
     normalize = st.checkbox("Normalizza (0–1)", value=False, help="Scala ogni variabile su [0,1] per confronti su un unico grafico.")
 
 # Optional resampling
 if resample != "nessuna":
-    rule = resample
     dff = (dff.set_index('ts')
-             .resample(rule)
+             .resample(resample)
              .mean(numeric_only=True)
              .reset_index())
 
@@ -108,10 +128,11 @@ if resample != "nessuna":
 plot_df = dff.copy()
 if normalize and vars_selected:
     for c in vars_selected:
-        s = plot_df[c]
-        rng = s.max() - s.min()
-        if pd.notna(rng) and rng != 0:
-            plot_df[c] = (s - s.min()) / rng
+        if c in plot_df.columns:
+            s = plot_df[c]
+            rng = s.max() - s.min()
+            if pd.notna(rng) and rng != 0:
+                plot_df[c] = (s - s.min()) / rng
 
 # --- Charts ---
 st.subheader("Grafico interattivo")
@@ -122,12 +143,12 @@ else:
     fig.update_layout(legend=dict(orientation="h", y=-0.2), margin=dict(l=10, r=10, t=30, b=10), height=500)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Separate small multiples (optional)
     with st.expander("Vedi grafici separati per variabile"):
         for v in vars_selected:
-            fig_v = px.line(plot_df, x="ts", y=v, markers=show_points, title=v)
-            fig_v.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=280)
-            st.plotly_chart(fig_v, use_container_width=True)
+            if v in plot_df.columns:
+                fig_v = px.line(plot_df, x="ts", y=v, markers=show_points, title=v)
+                fig_v.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=280)
+                st.plotly_chart(fig_v, use_container_width=True)
 
 # --- KPIs quick view ---
 st.subheader("Indicatori rapidi")
@@ -145,7 +166,8 @@ for i, v in enumerate(default_vars[:4]):
 
 # --- Data table and download ---
 with st.expander("Dati filtrati"):
-    st.dataframe(dff[['ts'] + [c for c in vars_selected if c in dff.columns]], hide_index=True, use_container_width=True)
+    cols_to_show = ['ts'] + [c for c in vars_selected if c in dff.columns]
+    st.dataframe(dff[cols_to_show], hide_index=True, use_container_width=True)
     csv = dff.to_csv(index=False).encode('utf-8')
     st.download_button("Scarica CSV filtrato", data=csv, file_name="tera_filtrato.csv", mime="text/csv")
 
