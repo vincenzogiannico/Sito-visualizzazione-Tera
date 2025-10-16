@@ -3,25 +3,20 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta
-
 CSV_URL = st.secrets["CSV_URL"]
-
-
-
 st.set_page_config(page_title="Tera Monitor", page_icon="📈", layout="wide")
 
 
 # --- Sidebar ---
 st.sidebar.title("⚙️ Controlli")
-st.sidebar.caption("Il caricamento usa cache con TTL fisso (60s). Usa 'Ricarica dati' per forzare un reload.")
+st.sidebar.caption("Cache dati: TTL 60s. Usa 'Ricarica dati' per un reload forzato.")
 reload_btn = st.sidebar.button("🔄 Ricarica dati (svuota cache)")
 
 # --- Data loading ---
 @st.cache_data(ttl=60)
 def load_data(url: str) -> pd.DataFrame:
     df = pd.read_csv(url)
-    # Parse ISO8601; se è presente il fuso orario, pandas lo conserva
-    df['ts'] = pd.to_datetime(df['ts'], utc=True, errors='coerce')  # imponiamo UTC
+    df['ts'] = pd.to_datetime(df['ts'], utc=True, errors='coerce')
     df = df.dropna(subset=['ts']).sort_values('ts')
     return df
 
@@ -32,15 +27,14 @@ if reload_btn:
 df = load_data(CSV_URL)
 
 if df.empty or df['ts'].isna().all():
-    st.error("Non posso verificare il contenuto del CSV o la colonna 'ts' non è valida.")
+    st.error("Non posso verificarlo: CSV vuoto o colonna 'ts' non valida.")
     st.stop()
 
-# Identify numeric columns (exclude 'ts')
+# Numeric columns
 num_cols = [c for c in df.columns if c != 'ts' and pd.api.types.is_numeric_dtype(df[c])]
-default_vars = []
-for cand in ["A01_Temp", "A01_Umid"]:
-    if cand in num_cols:
-        default_vars.append(cand)
+
+# Default vars (se esistono)
+default_vars = [c for c in ["A01_Temp", "A01_Umid"] if c in num_cols]
 if not default_vars and num_cols:
     default_vars = num_cols[:2]
 
@@ -49,9 +43,7 @@ st.title("📊 Tera – Dashboard interattiva")
 # --- Time window selection ---
 st.subheader("Finestra temporale")
 
-# Helper per creare valori di input naive (senza tz) per i widget
 def to_naive(dt_aware: pd.Timestamp) -> datetime:
-    # Converte in UTC, poi ritorna naive (senza tz) per compatibilità con gli input Streamlit
     return dt_aware.tz_convert('UTC').to_pydatetime().replace(tzinfo=None)
 
 min_ts_aware = df['ts'].min().tz_convert('UTC')
@@ -66,18 +58,10 @@ with col_a:
     )
 with col_b:
     if preset == "Personalizzato":
-        start = st.datetime_input(
-            "Inizio (UTC)",
-            value=to_naive(min(max_ts_aware - pd.Timedelta(days=1), max_ts_aware)),
-            min_value=to_naive(min_ts_aware),
-            max_value=to_naive(max_ts_aware)
-        )
-        end = st.datetime_input(
-            "Fine (UTC)",
-            value=to_naive(max_ts_aware),
-            min_value=to_naive(min_ts_aware),
-            max_value=to_naive(max_ts_aware)
-        )
+        start = st.datetime_input("Inizio (UTC)", value=to_naive(max_ts_aware - pd.Timedelta(days=1)),
+                                  min_value=to_naive(min_ts_aware), max_value=to_naive(max_ts_aware))
+        end = st.datetime_input("Fine (UTC)", value=to_naive(max_ts_aware),
+                                min_value=to_naive(min_ts_aware), max_value=to_naive(max_ts_aware))
     else:
         max_naive = to_naive(max_ts_aware)
         if preset == "Ultime 6 ore":
@@ -93,7 +77,6 @@ with col_b:
         else:
             start, end = max_naive - timedelta(days=1), max_naive
 
-# Funzione robusta: porta qualsiasi datetime a Timestamp UTC consapevole
 def ensure_ts_utc(x) -> pd.Timestamp:
     tx = pd.Timestamp(x)
     if tx.tzinfo is None:
@@ -113,21 +96,26 @@ if dff.empty:
 # --- Sidebar: variabili e opzioni ---
 with st.sidebar:
     st.markdown("---")
-    st.markdown("### Variabili")
-    vars_selected = st.multiselect("Seleziona variabili (max 6)", options=num_cols, default=default_vars, max_selections=6)
+    st.markdown("### Variabili (non-univariate)")
+    # Solo variabili non univariate (>=2 valori distinti) nella finestra selezionata
+    non_univariate = [c for c in num_cols if c in dff.columns and dff[c].nunique(dropna=True) > 1]
+    if not non_univariate:
+        st.info("Nessuna variabile non univariata nella finestra selezionata. Allarga l'intervallo o attiva dispositivi.")
+    # Defaults filtrati
+    defaults_filtered = [c for c in default_vars if c in non_univariate]
+    if not defaults_filtered and non_univariate:
+        defaults_filtered = non_univariate[:2]
+    vars_selected = st.multiselect("Seleziona variabili", options=non_univariate, default=defaults_filtered)
     resample = st.selectbox("Aggregazione (resample)", options=["nessuna", "5min", "15min", "1H", "3H", "6H"], index=0,
-                            help="Media su intervalli temporali per rendere le serie più leggibili.")
+                            help="Media su intervalli per serie più leggibili.")
     show_points = st.checkbox("Mostra punti", value=False)
-    normalize = st.checkbox("Normalizza (0–1)", value=False, help="Scala ogni variabile su [0,1] per confronti su un unico grafico.")
+    normalize = st.checkbox("Normalizza (0–1)", value=False, help="Scala ciascuna variabile su [0,1]")
 
-# Optional resampling
-if resample != "nessuna":
-    dff = (dff.set_index('ts')
-             .resample(resample)
-             .mean(numeric_only=True)
-             .reset_index())
+# Resampling
+if resample != "nessuna" and not dff.empty:
+    dff = (dff.set_index('ts').resample(resample).mean(numeric_only=True).reset_index())
 
-# Normalization for visualization
+# Normalization
 plot_df = dff.copy()
 if normalize and vars_selected:
     for c in vars_selected:
@@ -140,7 +128,7 @@ if normalize and vars_selected:
 # --- Charts ---
 st.subheader("Grafico interattivo")
 if not vars_selected:
-    st.info("Seleziona almeno una variabile nella sidebar.")
+    st.info("Seleziona almeno una variabile non-univariata nella sidebar.")
 else:
     fig = px.line(plot_df, x="ts", y=vars_selected, markers=show_points)
     fig.update_layout(legend=dict(orientation="h", y=-0.2), margin=dict(l=10, r=10, t=30, b=10), height=500)
@@ -153,7 +141,7 @@ else:
                 fig_v.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=280)
                 st.plotly_chart(fig_v, use_container_width=True)
 
-# --- KPIs quick view ---
+# --- KPIs ---
 st.subheader("Indicatori rapidi")
 kcols = st.columns(4)
 def last_val(col):
@@ -161,13 +149,13 @@ def last_val(col):
         return dff[col].iloc[-1]
     return None
 
-for i, v in enumerate(default_vars[:4]):
+for i, v in enumerate([c for c in default_vars if c in dff.columns][:4]):
     with kcols[i]:
         val = last_val(v)
         if val is not None:
             st.metric(v, f"{val:.2f}")
 
-# --- Data table and download ---
+# --- Data table & download ---
 with st.expander("Dati filtrati"):
     cols_to_show = ['ts'] + [c for c in vars_selected if c in dff.columns]
     st.dataframe(dff[cols_to_show], hide_index=True, use_container_width=True)
