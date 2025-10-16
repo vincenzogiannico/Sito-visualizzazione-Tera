@@ -75,19 +75,52 @@ with col_a:
         options=["Ultime 6 ore", "Ultime 12 ore", "Ultime 24 ore", "Ultimi 3 giorni", "Ultimi 7 giorni", "Personalizzato"],
         index=2
     )
-
 with col_b:
     max_naive = to_naive(max_ts_aware)
     min_naive = to_naive(min_ts_aware)
 
     if preset == "Personalizzato":
+        # default: ultime 24h
         start_default = to_naive(max_ts_aware - pd.Timedelta(days=1))
         end_default   = max_naive
 
-        if hasattr(st, "datetime_input"):
-            start = st.datetime_input("Inizio (UTC)", value=start_default, min_value=min_naive, max_value=max_naive)
-            end   = st.datetime_input("Fine (UTC)",   value=end_default,   min_value=min_naive, max_value=max_naive)
+        # Toggle: calendario + orari (se disattivo, usa slider)
+        use_calendar = st.toggle("Usa calendario + orario", value=True, help="Se disattivato, usa lo slider di intervallo.")
+
+        if use_calendar:
+            # --- DATE RANGE con calendarietto ---
+            start_date, end_date = st.date_input(
+                "Intervallo date (UTC)",
+                value=(start_default.date(), end_default.date()),
+                min_value=min_naive.date(),
+                max_value=max_naive.date()
+            )
+
+            # --- ORARI ---
+            c1, c2 = st.columns(2)
+            with c1:
+                start_time = st.time_input(
+                    "Ora inizio (UTC)",
+                    value=start_default.time(),
+                    step=timedelta(minutes=1)
+                )
+            with c2:
+                end_time = st.time_input(
+                    "Ora fine (UTC)",
+                    value=end_default.time(),
+                    step=timedelta(minutes=1)
+                )
+
+            # Combina date + orari -> datetime naive (UTC)
+            start = datetime.combine(start_date, start_time)
+            end   = datetime.combine(end_date, end_time)
+
+            # Clamp ai limiti disponibili (evita out-of-range)
+            if start < min_naive: start = min_naive
+            if end   > max_naive: end   = max_naive
+
         else:
+            # --- FALLBACK: SLIDER di datetimes ---
             start, end = st.slider(
                 "Intervallo personalizzato (UTC)",
                 min_value=min_naive,
@@ -96,7 +129,9 @@ with col_b:
                 step=timedelta(minutes=1),
                 format="YYYY-MM-DD HH:mm",
             )
+
     else:
+        max_naive = to_naive(max_ts_aware)
         if preset == "Ultime 6 ore":
             start, end = max_naive - timedelta(hours=6), max_naive
         elif preset == "Ultime 12 ore":
@@ -109,6 +144,7 @@ with col_b:
             start, end = max_naive - timedelta(days=7), max_naive
         else:
             start, end = max_naive - timedelta(days=1), max_naive
+
 
 # Validazione range
 if start > end:
