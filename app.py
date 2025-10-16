@@ -4,9 +4,12 @@ import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta
 
+CSV_URL = st.secrets["CSV_URL"]
+
+
+
 st.set_page_config(page_title="Tera Monitor", page_icon="📈", layout="wide")
 
-CSV_URL = "https://gist.githubusercontent.com/vincenzogiannico/53654730a091a40b4458ba923241d209/raw/tera_allvars.csv"
 
 # --- Sidebar ---
 st.sidebar.title("⚙️ Controlli")
