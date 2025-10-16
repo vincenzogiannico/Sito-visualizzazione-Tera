@@ -115,4 +115,92 @@ with st.sidebar:
     # Classificazione rispetto alla finestra selezionata
     numeric_in_window = [c for c in num_cols if c in dff.columns]
     uni_vars = [c for c in numeric_in_window if dff[c].nunique(dropna=True) <= 1]
-    nonuni_vars = [c for c in numeric_in_window if dff[c].nunique(dropna=Tru]()_
+    nonuni_vars = [c for c in numeric_in_window if dff[c].nunique(dropna=True) > 1]
+
+    defaults_nonuni = [c for c in default_vars if c in nonuni_vars] or nonuni_vars[:2]
+    tab_nonuni, tab_uni = st.tabs(["Non univariate", "Univariate"])
+
+    with tab_nonuni:
+        nonuni_selected = st.multiselect(
+            "Seleziona variabili che VARIANO",
+            options=nonuni_vars,
+            default=defaults_nonuni,
+            key="ms_nonuni"
+        )
+
+    with tab_uni:
+        uni_selected = st.multiselect(
+            "Seleziona variabili COSTANTI",
+            options=uni_vars,
+            default=[],
+            key="ms_uni"
+        )
+
+    # Unisci selezioni
+    vars_selected = list(dict.fromkeys((nonuni_selected or []) + (uni_selected or [])))
+
+    resample = st.selectbox(
+        "Aggregazione (resample)",
+        options=["nessuna", "5min", "15min", "1H", "3H", "6H"],
+        index=0,
+        help="Media su intervalli per serie più leggibili."
+    )
+    show_points = st.checkbox("Mostra punti", value=False)
+    normalize = st.checkbox("Normalizza (0–1)", value=False,
+                            help="Scala ciascuna variabile su [0,1]")
+
+# Resampling (dopo selezione)
+if resample != "nessuna" and not dff.empty:
+    dff = (dff.set_index('ts').resample(resample).mean(numeric_only=True).reset_index())
+
+# Normalization
+plot_df = dff.copy()
+if normalize and vars_selected:
+    for c in vars_selected:
+        if c in plot_df.columns:
+            s = plot_df[c]
+            rng = s.max() - s.min()
+            if pd.notna(rng) and rng != 0:
+                plot_df[c] = (s - s.min()) / rng
+
+# === Charts ===
+st.subheader("Grafico interattivo")
+if not vars_selected:
+    st.info("Seleziona almeno una variabile in sidebar.")
+else:
+    fig = px.line(plot_df, x="ts", y=vars_selected, markers=show_points)
+    fig.update_layout(legend=dict(orientation="h", y=-0.2), margin=dict(l=10, r=10, t=30, b=10), height=500)
+    st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("Vedi grafici separati per variabile"):
+        for v in vars_selected:
+            if v in plot_df.columns:
+                fig_v = px.line(plot_df, x="ts", y=v, markers=show_points, title=v)
+                fig_v.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=280)
+                st.plotly_chart(fig_v, use_container_width=True)
+
+# === KPIs ===
+st.subheader("Indicatori rapidi")
+kcols = st.columns(4)
+def last_val(col):
+    if col in dff.columns and pd.api.types.is_numeric_dtype(dff[col]):
+        return dff[col].iloc[-1]
+    return None
+
+for i, v in enumerate([c for c in default_vars if c in dff.columns][:4]):
+    with kcols[i]:
+        val = last_val(v)
+        if val is not None:
+            st.metric(v, f"{val:.2f}")
+
+# === Data table & download ===
+with st.expander("Dati filtrati"):
+    cols_to_show = ['ts'] + [c for c in (vars_selected or []) if c in dff.columns]
+    if cols_to_show == ['ts']:
+        cols_to_show = ['ts'] + [c for c in num_cols if c in dff.columns][:5]  # fallback
+    st.dataframe(dff[cols_to_show], hide_index=True, use_container_width=True)
+    csv = dff.to_csv(index=False).encode('utf-8')
+    st.download_button("Scarica CSV filtrato", data=csv, file_name="tera_filtrato.csv", mime="text/csv")
+
+# === Footer ===
+st.caption("Fonte dati: URL fornito via secrets/env (non esposto nel codice).")
