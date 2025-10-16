@@ -50,7 +50,7 @@ if df.empty or df['ts'].isna().all():
 
 # === Column sets ===
 num_cols = [c for c in df.columns if c != 'ts' and pd.api.types.is_numeric_dtype(df[c])]
-default_vars = [c for c in ["A01_Temp", "A02_Temp"] if c in num_cols] or num_cols[:2]
+default_vars = [c for c in ["Salone_Temp", "Matrimoniale_Temp"] if c in num_cols] or num_cols[:2]
 
 st.title("📊 Tera – Dashboard interattiva")
 
