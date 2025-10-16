@@ -34,11 +34,14 @@ reload_btn = st.sidebar.button("🔄 Ricarica dati (svuota cache)")
 def load_data(url: str) -> pd.DataFrame:
     df = pd.read_csv(url)
     # Impone UTC aware per la colonna ts
+
+
     df['ts'] = pd.to_datetime(df['ts'], utc=True, errors='coerce')
     df['ts'] = df['ts'].dt.tz_convert('Europe/Rome')  # converte in ora italiana (CET/CEST)
     df = df.dropna(subset=['ts']).sort_values('ts')
-return df
     return df
+
+
 
 if reload_btn:
     load_data.clear()
