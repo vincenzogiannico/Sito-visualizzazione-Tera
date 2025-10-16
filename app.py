@@ -1,21 +1,39 @@
-
+import os
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta
-CSV_URL = st.secrets["CSV_URL"]
+
 st.set_page_config(page_title="Tera Monitor", page_icon="📈", layout="wide")
 
+# === CSV URL as hidden variable (secrets / env), with fallback UI ===
+def get_csv_url() -> str:
+    try:
+        # Prefer Streamlit secrets if available
+        return st.secrets["CSV_URL"]
+    except Exception:
+        return os.getenv("CSV_URL", "")
 
-# --- Sidebar ---
+CSV_URL = get_csv_url()
+
 st.sidebar.title("⚙️ Controlli")
-st.sidebar.caption("Cache dati: TTL 60s. Usa 'Ricarica dati' per un reload forzato.")
+st.sidebar.caption("La sorgente dati può essere definita nei *secrets* come CSV_URL o in variabile d'ambiente.\nCache dati: TTL 60s.")
+
+# Fallback: se URL non presente nei secrets/env, consenti inserimento manuale (non viene mostrato nel codice)
+if not CSV_URL:
+    CSV_URL = st.sidebar.text_input("URL CSV (fallback)", value="", type="password", help="Usa questa casella solo se non hai configurato CSV_URL nei secrets o come variabile d'ambiente.")
+    if not CSV_URL:
+        st.warning("Configura CSV_URL nei secrets/env oppure inserisci l'URL nella sidebar per procedere.")
+        st.stop()
+
+# === Reload button ===
 reload_btn = st.sidebar.button("🔄 Ricarica dati (svuota cache)")
 
-# --- Data loading ---
+# === Data loading with cache ===
 @st.cache_data(ttl=60)
 def load_data(url: str) -> pd.DataFrame:
     df = pd.read_csv(url)
+    # Impone UTC aware per la colonna ts
     df['ts'] = pd.to_datetime(df['ts'], utc=True, errors='coerce')
     df = df.dropna(subset=['ts']).sort_values('ts')
     return df
@@ -27,20 +45,16 @@ if reload_btn:
 df = load_data(CSV_URL)
 
 if df.empty or df['ts'].isna().all():
-    st.error("Non posso verificarlo: CSV vuoto o colonna 'ts' non valida.")
+    st.error("CSV vuoto o colonna 'ts' non valida.")
     st.stop()
 
-# Numeric columns
+# === Column sets ===
 num_cols = [c for c in df.columns if c != 'ts' and pd.api.types.is_numeric_dtype(df[c])]
-
-# Default vars (se esistono)
-default_vars = [c for c in ["A01_Temp", "A01_Umid"] if c in num_cols]
-if not default_vars and num_cols:
-    default_vars = num_cols[:2]
+default_vars = [c for c in ["A01_Temp", "A01_Umid"] if c in num_cols] or num_cols[:2]
 
 st.title("📊 Tera – Dashboard interattiva")
 
-# --- Time window selection ---
+# === Time window selection ===
 st.subheader("Finestra temporale")
 
 def to_naive(dt_aware: pd.Timestamp) -> datetime:
@@ -93,73 +107,12 @@ if dff.empty:
     st.warning("La finestra selezionata non contiene dati. Mostro l'ultimo record disponibile.")
     dff = df.tail(1)
 
-# --- Sidebar: variabili e opzioni ---
+# === Sidebar: variables UI with two tabs ===
 with st.sidebar:
     st.markdown("---")
-    st.markdown("### Variabili (non-univariate)")
-    # Solo variabili non univariate (>=2 valori distinti) nella finestra selezionata
-    non_univariate = [c for c in num_cols if c in dff.columns and dff[c].nunique(dropna=True) > 1]
-    if not non_univariate:
-        st.info("Nessuna variabile non univariata nella finestra selezionata. Allarga l'intervallo o attiva dispositivi.")
-    # Defaults filtrati
-    defaults_filtered = [c for c in default_vars if c in non_univariate]
-    if not defaults_filtered and non_univariate:
-        defaults_filtered = non_univariate[:2]
-    vars_selected = st.multiselect("Seleziona variabili", options=non_univariate, default=defaults_filtered)
-    resample = st.selectbox("Aggregazione (resample)", options=["nessuna", "5min", "15min", "1H", "3H", "6H"], index=0,
-                            help="Media su intervalli per serie più leggibili.")
-    show_points = st.checkbox("Mostra punti", value=False)
-    normalize = st.checkbox("Normalizza (0–1)", value=False, help="Scala ciascuna variabile su [0,1]")
+    st.markdown("### Variabili")
 
-# Resampling
-if resample != "nessuna" and not dff.empty:
-    dff = (dff.set_index('ts').resample(resample).mean(numeric_only=True).reset_index())
-
-# Normalization
-plot_df = dff.copy()
-if normalize and vars_selected:
-    for c in vars_selected:
-        if c in plot_df.columns:
-            s = plot_df[c]
-            rng = s.max() - s.min()
-            if pd.notna(rng) and rng != 0:
-                plot_df[c] = (s - s.min()) / rng
-
-# --- Charts ---
-st.subheader("Grafico interattivo")
-if not vars_selected:
-    st.info("Seleziona almeno una variabile non-univariata nella sidebar.")
-else:
-    fig = px.line(plot_df, x="ts", y=vars_selected, markers=show_points)
-    fig.update_layout(legend=dict(orientation="h", y=-0.2), margin=dict(l=10, r=10, t=30, b=10), height=500)
-    st.plotly_chart(fig, use_container_width=True)
-
-    with st.expander("Vedi grafici separati per variabile"):
-        for v in vars_selected:
-            if v in plot_df.columns:
-                fig_v = px.line(plot_df, x="ts", y=v, markers=show_points, title=v)
-                fig_v.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=280)
-                st.plotly_chart(fig_v, use_container_width=True)
-
-# --- KPIs ---
-st.subheader("Indicatori rapidi")
-kcols = st.columns(4)
-def last_val(col):
-    if col in dff.columns and pd.api.types.is_numeric_dtype(dff[col]):
-        return dff[col].iloc[-1]
-    return None
-
-for i, v in enumerate([c for c in default_vars if c in dff.columns][:4]):
-    with kcols[i]:
-        val = last_val(v)
-        if val is not None:
-            st.metric(v, f"{val:.2f}")
-
-# --- Data table & download ---
-with st.expander("Dati filtrati"):
-    cols_to_show = ['ts'] + [c for c in vars_selected if c in dff.columns]
-    st.dataframe(dff[cols_to_show], hide_index=True, use_container_width=True)
-    csv = dff.to_csv(index=False).encode('utf-8')
-    st.download_button("Scarica CSV filtrato", data=csv, file_name="tera_filtrato.csv", mime="text/csv")
-
-st.caption("Fonte dati: " + CSV_URL)
+    # Classificazione rispetto alla finestra selezionata
+    numeric_in_window = [c for c in num_cols if c in dff.columns]
+    uni_vars = [c for c in numeric_in_window if dff[c].nunique(dropna=True) <= 1]
+    nonuni_vars = [c for c in numeric_in_window if dff[c].nunique(dropna=Tru]()_
