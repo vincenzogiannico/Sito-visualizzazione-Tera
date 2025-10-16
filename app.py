@@ -9,7 +9,6 @@ st.set_page_config(page_title="Tera Monitor", page_icon="📈", layout="wide")
 # === CSV URL as hidden variable (secrets / env), with fallback UI ===
 def get_csv_url() -> str:
     try:
-        # Prefer Streamlit secrets if available
         return st.secrets["CSV_URL"]
     except Exception:
         return os.getenv("CSV_URL", "")
@@ -19,9 +18,12 @@ CSV_URL = get_csv_url()
 st.sidebar.title("⚙️ Controlli")
 st.sidebar.caption("La sorgente dati può essere definita nei *secrets* come CSV_URL o in variabile d'ambiente.\nCache dati: TTL 60s.")
 
-# Fallback: se URL non presente nei secrets/env, consenti inserimento manuale (non viene mostrato nel codice)
+# Fallback: se URL non presente nei secrets/env, consenti inserimento manuale
 if not CSV_URL:
-    CSV_URL = st.sidebar.text_input("URL CSV (fallback)", value="", type="password", help="Usa questa casella solo se non hai configurato CSV_URL nei secrets o come variabile d'ambiente.")
+    CSV_URL = st.sidebar.text_input(
+        "URL CSV (fallback)", value="", type="password",
+        help="Usa questa casella solo se non hai configurato CSV_URL nei secrets o come variabile d'ambiente."
+    )
     if not CSV_URL:
         st.warning("Configura CSV_URL nei secrets/env oppure inserisci l'URL nella sidebar per procedere.")
         st.stop()
@@ -33,15 +35,12 @@ reload_btn = st.sidebar.button("🔄 Ricarica dati (svuota cache)")
 @st.cache_data(ttl=60)
 def load_data(url: str) -> pd.DataFrame:
     df = pd.read_csv(url)
-    # Impone UTC aware per la colonna ts
 
-
+    # Timestamp aaware -> UTC, poi convertito in Europe/Rome
     df['ts'] = pd.to_datetime(df['ts'], utc=True, errors='coerce')
-    df['ts'] = df['ts'].dt.tz_convert('Europe/Rome')  # converte in ora italiana (CET/CEST)
+    df['ts'] = df['ts'].dt.tz_convert('Europe/Rome')
     df = df.dropna(subset=['ts']).sort_values('ts')
     return df
-
-
 
 if reload_btn:
     load_data.clear()
@@ -63,26 +62,41 @@ st.title("📊 Tera – Dashboard interattiva")
 st.subheader("Finestra temporale")
 
 def to_naive(dt_aware: pd.Timestamp) -> datetime:
+    # ritorna datetime naive riferito a UTC (per widget che chiedono naive)
     return dt_aware.tz_convert('UTC').to_pydatetime().replace(tzinfo=None)
 
 min_ts_aware = df['ts'].min().tz_convert('UTC')
 max_ts_aware = df['ts'].max().tz_convert('UTC')
 
-col_a, col_b = st.columns([1,2])
+col_a, col_b = st.columns([1, 2])
 with col_a:
     preset = st.selectbox(
         "Seleziona intervallo",
         options=["Ultime 6 ore", "Ultime 12 ore", "Ultime 24 ore", "Ultimi 3 giorni", "Ultimi 7 giorni", "Personalizzato"],
         index=2
     )
+
 with col_b:
+    max_naive = to_naive(max_ts_aware)
+    min_naive = to_naive(min_ts_aware)
+
     if preset == "Personalizzato":
-        start = st.datetime_input("Inizio (UTC)", value=to_naive(max_ts_aware - pd.Timedelta(days=1)),
-                                  min_value=to_naive(min_ts_aware), max_value=to_naive(max_ts_aware))
-        end = st.datetime_input("Fine (UTC)", value=to_naive(max_ts_aware),
-                                min_value=to_naive(min_ts_aware), max_value=to_naive(max_ts_aware))
+        start_default = to_naive(max_ts_aware - pd.Timedelta(days=1))
+        end_default   = max_naive
+
+        if hasattr(st, "datetime_input"):
+            start = st.datetime_input("Inizio (UTC)", value=start_default, min_value=min_naive, max_value=max_naive)
+            end   = st.datetime_input("Fine (UTC)",   value=end_default,   min_value=min_naive, max_value=max_naive)
+        else:
+            start, end = st.slider(
+                "Intervallo personalizzato (UTC)",
+                min_value=min_naive,
+                max_value=max_naive,
+                value=(start_default, end_default),
+                step=timedelta(minutes=1),
+                format="YYYY-MM-DD HH:mm",
+            )
     else:
-        max_naive = to_naive(max_ts_aware)
         if preset == "Ultime 6 ore":
             start, end = max_naive - timedelta(hours=6), max_naive
         elif preset == "Ultime 12 ore":
@@ -95,6 +109,11 @@ with col_b:
             start, end = max_naive - timedelta(days=7), max_naive
         else:
             start, end = max_naive - timedelta(days=1), max_naive
+
+# Validazione range
+if start > end:
+    st.error("Intervallo non valido: l'inizio è successivo alla fine.")
+    st.stop()
 
 def ensure_ts_utc(x) -> pd.Timestamp:
     tx = pd.Timestamp(x)
@@ -151,12 +170,11 @@ with st.sidebar:
         help="Media su intervalli per serie più leggibili."
     )
     show_points = st.checkbox("Mostra punti", value=False)
-    normalize = st.checkbox("Normalizza (0–1)", value=False,
-                            help="Scala ciascuna variabile su [0,1]")
+    normalize = st.checkbox("Normalizza (0–1)", value=False, help="Scala ciascuna variabile su [0,1]")
 
 # Resampling (dopo selezione)
 if resample != "nessuna" and not dff.empty:
-    dff = (dff.set_index('ts').resample(resample).mean(numeric_only=True).reset_index())
+    dff = dff.set_index('ts').resample(resample).mean(numeric_only=True).reset_index()
 
 # Normalization
 plot_df = dff.copy()
