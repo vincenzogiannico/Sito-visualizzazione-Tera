@@ -40,7 +40,7 @@ def load_data(url: str) -> pd.DataFrame:
 
 if reload_btn:
     load_data.clear()
-    st.experimental_rerun()
+    st.rerun()
 
 df = load_data(CSV_URL)
 
